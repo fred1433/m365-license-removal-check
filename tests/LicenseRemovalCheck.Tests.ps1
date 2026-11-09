@@ -251,6 +251,244 @@ Describe 'Collection status is not permission' {
     }
 }
 
+Describe 'Fix 1: archive' {
+    It 'Archive present: REVIEW, quoting the full Microsoft sentence' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.ArchiveGuid = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f'
+        $s.exchange.mailbox.ArchiveDatabase = 'NAMPR01DG123-db045'
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.reasons[0].text | Should -Match ([regex]::Escape('"To increase the size of the archive mailbox, an Exchange Online Plan 2 license or an Exchange Online Plan 1 license with an Exchange Online Archiving add-on license is required."'))
+        $r.reasons[0].text | Should -Not -Match 'its own license'
+    }
+    It 'Only <Set> is set: REVIEW, archive state inconsistent' -ForEach @(
+        @{ Set = 'ArchiveGuid'; Guid = '3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f'; Db = $null }
+        @{ Set = 'ArchiveDatabase'; Guid = '00000000-0000-0000-0000-000000000000'; Db = 'NAMPR01DG123-db045' }
+    ) {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.ArchiveGuid = $Guid
+        $s.exchange.mailbox.ArchiveDatabase = $Db
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        @($r.reasons.rule) | Should -Be @('archive-inconsistent')
+        $r.reasons[0].text | Should -Match 'archive state inconsistent'
+    }
+}
+
+Describe 'Fix 2: no decision without the data' {
+    It '<Label>: REVIEW <Rule>, status 1001' -ForEach @(
+        @{ Label = 'planned_removals missing'; Rule = 'batch-unreadable'; Change = { param($s) $s.Remove('planned_removals') } }
+        @{ Label = 'planned_removals.groups missing'; Rule = 'batch-unreadable'; Change = { param($s) $s.planned_removals.Remove('groups') } }
+        @{ Label = 'planned_removals.license_sku_ids missing'; Rule = 'batch-unreadable'; Change = { param($s) $s.planned_removals.Remove('license_sku_ids') } }
+        @{ Label = 'planned_removals.groups misnamed'; Rule = 'batch-unreadable'; Change = { param($s) $s.planned_removals = [ordered]@{ group_ids = @($script:FirmStaff); license_sku_ids = @() } } }
+        @{ Label = 'planned_removals.groups a single string'; Rule = 'batch-unreadable'; Change = { param($s) $s.planned_removals.groups = $script:FirmStaff } }
+        @{ Label = 'assignedByGroup key missing'; Rule = 'assignment-incomplete'; Change = { param($s) $s.graph.user.licenseAssignmentStates[2].Remove('assignedByGroup') } }
+        @{ Label = 'disabledPlans missing'; Rule = 'assignment-incomplete'; Change = { param($s) $s.graph.user.licenseAssignmentStates[2].Remove('disabledPlans') } }
+        @{ Label = 'LitigationHoldEnabled null'; Rule = 'hold-unknown'; Change = { param($s) $s.exchange.mailbox.LitigationHoldEnabled = $null } }
+        @{ Label = 'LitigationHoldEnabled missing'; Rule = 'hold-unknown'; Change = { param($s) $s.exchange.mailbox.Remove('LitigationHoldEnabled') } }
+        @{ Label = 'LitigationHoldEnabled the string True'; Rule = 'hold-unknown'; Change = { param($s) $s.exchange.mailbox.LitigationHoldEnabled = 'True' } }
+        @{ Label = 'mailbox InPlaceHolds null'; Rule = 'hold-unknown'; Change = { param($s) $s.exchange.mailbox.InPlaceHolds = $null } }
+        @{ Label = 'mailbox InPlaceHolds missing'; Rule = 'hold-unknown'; Change = { param($s) $s.exchange.mailbox.Remove('InPlaceHolds') } }
+        @{ Label = 'RecipientTypeDetails missing'; Rule = 'type-unknown'; Change = { param($s) $s.exchange.mailbox.Remove('RecipientTypeDetails') } }
+        @{ Label = 'RecipientTypeDetails empty'; Rule = 'type-unknown'; Change = { param($s) $s.exchange.mailbox.RecipientTypeDetails = '' } }
+        @{ Label = 'onPremisesSyncEnabled missing'; Rule = 'identity-unknown'; Change = { param($s) $s.graph.user.Remove('onPremisesSyncEnabled') } }
+        @{ Label = 'ArchiveGuid null'; Rule = 'archive-unknown'; Change = { param($s) $s.exchange.mailbox.ArchiveGuid = $null } }
+    ) {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        & $Change $s
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.status | Should -Be 1001
+        @($r.reasons.rule) | Should -Contain $Rule
+    }
+
+    It 'licenseAssignmentStates missing on a 62 GB shared mailbox: REVIEW licenses-unknown only' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.graph.user.Remove('licenseAssignmentStates')
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        @($r.reasons.rule) | Should -Be @('licenses-unknown')
+    }
+
+    It 'An explicit empty license list is a valid batch' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.planned_removals.license_sku_ids = @()
+        (Invoke-Check $s).decision | Should -Be 'ALLOW'
+    }
+
+    It 'onPremisesSyncEnabled false is a cloud identity: ALLOW' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.graph.user.onPremisesSyncEnabled = $false
+        (Invoke-Check $s).decision | Should -Be 'ALLOW'
+    }
+}
+
+Describe 'Fix 3: the mailbox must be hers' {
+    It 'Mailbox ExternalDirectoryObjectId is another user: REVIEW, success false' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.ExternalDirectoryObjectId = '11111111-2222-4333-8444-555555555555'
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.success | Should -BeFalse
+        $r.reasons[0].rule | Should -Be 'mailbox-owner-mismatch'
+    }
+    It 'Mailbox ExternalDirectoryObjectId missing: REVIEW' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.Remove('ExternalDirectoryObjectId')
+        (Invoke-Check $s).reasons[0].rule | Should -Be 'mailbox-owner-unknown'
+    }
+    It 'Statistics MailboxGuid differs from mailbox ExchangeGuid: REVIEW' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.ExchangeGuid = '0d1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f4a'
+        $s.exchange.mailbox_statistics.MailboxGuid = 'ffffffff-4b5c-4d6e-8f7a-9b0c1d2e3f4a'
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.reasons[0].rule | Should -Be 'statistics-mismatch'
+    }
+    It 'Statistics MailboxGuid equals mailbox ExchangeGuid: ALLOW' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.ExchangeGuid = '0d1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f4a'
+        $s.exchange.mailbox_statistics.MailboxGuid = '0d1e2f3a-4b5c-4d6e-8f7a-9b0c1d2e3f4a'
+        (Invoke-Check $s).decision | Should -Be 'ALLOW'
+    }
+}
+
+Describe 'Fix 4: no ALLOW unless the mailbox reads back as shared' {
+    It 'UserMailbox, conversion not requested, 5 GB: REVIEW not-shared' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.conversion_requested = $false
+        $s.exchange.mailbox.RecipientTypeDetails = 'UserMailbox'
+        $s.exchange.mailbox_statistics.TotalItemSize = [int64]5GB
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        @($r.reasons.rule) | Should -Contain 'not-shared'
+    }
+    It 'UserMailbox, conversion_requested missing, 62 GB, last Plan 2 removed: BLOCK, both reasons listed' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.Remove('conversion_requested')
+        $s.exchange.mailbox.RecipientTypeDetails = 'UserMailbox'
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'BLOCK'
+        @($r.reasons.rule) | Should -Contain 'last-plan2-removed'
+        @($r.reasons.rule) | Should -Contain 'not-shared'
+    }
+}
+
+Describe 'Fix 5: the green light names the exact batch' {
+    It 'Group only, direct Plan 2 kept: ALLOW' {
+        (Invoke-Check (Get-Fixture 'scenario-2-second-plan2-kept')).decision | Should -Be 'ALLOW'
+    }
+    It 'Same group plus the direct Plan 2 SKU: BLOCK' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.planned_removals.license_sku_ids = @($script:Plan2)
+        (Invoke-Check $s).decision | Should -Be 'BLOCK'
+    }
+    It 'Direct Plan 2 SKU removed, no group in the batch: BLOCK, remediation does not talk about a group' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.graph.user.licenseAssignmentStates = @((New-Plan2 $null))
+        $s.planned_removals.groups = @()
+        $s.planned_removals.license_sku_ids = @($script:Plan2)
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'BLOCK'
+        $r.reasons[0].remediation | Should -Not -Match 'group'
+        $r.reasons[0].text | Should -Match 'direct assignment'
+    }
+}
+
+Describe 'Fix 6: BLOCK and a hold together' {
+    It 'Both reasons listed, remediation starts with keeping Plan 2, size reduction only with the hold owner' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.exchange.mailbox.LitigationHoldEnabled = $true
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'BLOCK'
+        @($r.reasons.rule) | Should -Be @('last-plan2-removed', 'hold-present')
+        $r.reasons[0].remediation | Should -Match '^Keep Plan 2 assigned independently'
+        $r.reasons[0].remediation | Should -Match 'only after whoever owns the hold approves'
+        $r.reasons[0].remediation | Should -Not -Match 'Or bring'
+    }
+}
+
+Describe 'Fix 7 and 8: limits and wording at the line' {
+    It 'Shared mailbox above 100 GB with Plan 2 kept: REVIEW over-plan2-ceiling' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox_statistics.TotalItemSize = [int64]107374182401
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        @($r.reasons.rule) | Should -Be @('over-plan2-ceiling')
+        $r.reasons[0].text | Should -Match 'nominal limit'
+    }
+    It 'Exactly 50 GB: the reason says it reaches the quota, in bytes' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.exchange.mailbox_statistics.TotalItemSize = [int64]53687091200
+        $t = (Invoke-Check $s).reasons[0].text
+        $t | Should -Match 'reaches the 50 GB quota at exactly 53,687,091,200 bytes'
+        $t | Should -Not -Match 'at 50 GB'
+    }
+    It 'One byte over: the reason gives bytes, never "at 50 GB"' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.exchange.mailbox_statistics.TotalItemSize = [int64]53687091201
+        $t = (Invoke-Check $s).reasons[0].text
+        $t | Should -Match 'goes over its 50 GB quota at 53,687,091,201 bytes'
+        $t | Should -Not -Match 'at 50 GB'
+    }
+}
+
+Describe 'Fix 9: holds, from the worldwide Purview page' {
+    It 'Every hold reason cites the worldwide page, not the 21Vianet one' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.mailbox.DelayHoldApplied = $true
+        $r = Invoke-Check $s
+        $r.reasons[0].source | Should -Be 'https://learn.microsoft.com/en-us/purview/edisc-hold-types-mailboxes'
+    }
+    It 'Organization grp entry: REVIEW, described with the page''s words' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.organization_config.InPlaceHolds = @('grp1a0a132ee8944501a4bb6a452ec31171:3')
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.reasons[0].hold_type | Should -Be 'organization-wide retention policy applied to Microsoft 365 groups and Teams channel messages'
+        $r.reasons[0].text | Should -Not -Match 'can cover'
+    }
+    It 'Organization mbx policy with a matching -mbx exclusion on the mailbox: still REVIEW, the exclusion is quoted' {
+        $s = Get-Fixture 'scenario-2-second-plan2-kept'
+        $s.exchange.organization_config.InPlaceHolds = @('mbxe9b52bf7ab3b46a286308ecb29624696:2')
+        $s.exchange.mailbox.InPlaceHolds = @('-mbxe9b52bf7ab3b46a286308ecb29624696')
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.reasons[0].mailbox_exclusion | Should -Be '-mbxe9b52bf7ab3b46a286308ecb29624696'
+    }
+}
+
+Describe 'Fix 11 and 13: labels' {
+    It 'Group without displayName: label is the GUID, no double space' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.graph.Remove('groups')
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'BLOCK'
+        $r.reasons[0].text | Should -Match "group $($script:FirmStaff)"
+        $r.reasons[0].text | Should -Not -Match '  '
+    }
+    It 'Only Plan 2 is ActiveWithError and removed: the reason says healthy (Active, no error)' {
+        $s = Get-Fixture 'scenario-1-firm-staff-only-plan2'
+        $s.graph.user.licenseAssignmentStates[1].state = 'ActiveWithError'
+        $s.graph.user.licenseAssignmentStates[1].error = 'CountViolation'
+        $r = Invoke-Check $s
+        $r.decision | Should -Be 'REVIEW'
+        $r.reasons[0].text | Should -Match 'no healthy \(Active, no error\)'
+    }
+    It 'A JSON file holding a bare string: "not a JSON object"' {
+        $p = Join-Path $TestDrive 'x.json'
+        Set-Content -LiteralPath $p -Value '"x"'
+        $r = Test-OffboardingRemovalSafety -AadUserId $script:User -TenantId $script:Tenant -SnapshotPath $p
+        $r.success | Should -BeFalse
+        $r.reasons[0].text | Should -Match 'not a JSON object'
+    }
+    It 'A truncated file: "not valid JSON"' {
+        $p = Join-Path $TestDrive 't.json'
+        Set-Content -LiteralPath $p -Value '{"graph": {'
+        (Test-OffboardingRemovalSafety -AadUserId $script:User -TenantId $script:Tenant -SnapshotPath $p).reasons[0].text | Should -Match 'not valid JSON'
+    }
+}
+
 Describe 'No retired modules' {
     It 'No MSOnline or AzureAD cmdlet name appears in the repository' {
         $pattern = '\b[A-Za-z]+-(' + 'Ms' + 'ol|Azure' + 'AD)[A-Za-z]*'

@@ -13,7 +13,9 @@
       "licenseAssignmentStates": [
         {
           "assignedByGroup": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
-          "disabledPlans": [],
+          "disabledPlans": [
+            "9aaf7827-d63c-4b61-89c3-182f06f82e5c"
+          ],
           "error": "None",
           "lastUpdatedDateTime": "2025-03-04T16:20:11Z",
           "skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46",

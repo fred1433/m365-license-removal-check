@@ -10,9 +10,9 @@
     {
       "rule": "org-retention-unknown",
       "decision": "REVIEW",
-      "text": "Human decision required: organization-wide retention could not be read, so its scope is unknown.",
+      "text": "Human decision required: the organization's retention settings could not be read, so the check does not approve the batch.",
       "missing_data": "Get-OrganizationConfig InPlaceHolds",
-      "source": "https://learn.microsoft.com/en-us/purview/ediscovery-identify-a-hold-on-an-exchange-online-mailbox"
+      "source": "https://learn.microsoft.com/en-us/purview/edisc-hold-types-mailboxes"
     }
   ],
   "capacity_kept_by": [
@@ -35,7 +35,7 @@
     ],
     "licenses": []
   },
-  "automation_log": "Read-only check started for aad_user_id a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13 in tenant 7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d.\nMailbox type read back: SharedMailbox.\nPrimary mailbox size: 66,571,993,088 bytes (limit without license 53,687,091,200).\nOrganization-wide retention not readable.\nPlan 2 assignments: 1 active removed by the batch, 1 active kept, 0 kept but not active.\nMailbox capacity stays covered by an active Plan 2 assignment outside the batch.\nDecision: REVIEW. Nothing was changed in the tenant.",
+  "automation_log": "Read-only check started for aad_user_id a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13 in tenant 7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d.\nMailbox type read back: SharedMailbox.\nPrimary mailbox size: 66,571,993,088 bytes (limit without license 53,687,091,200).\nOrganization-wide retention not readable.\nPlan 2 assignments: 1 healthy removed by the batch, 1 healthy kept, 0 kept but not healthy.\nMailbox capacity stays covered by a healthy Plan 2 assignment outside the batch.\nDecision: REVIEW. Nothing was changed in the tenant.",
   "writes": 0,
-  "note": "success means the data was collected. It does not mean the removal is allowed: read decision."
+  "note": "success and status describe the data collection. Only decision says whether the batch may run."
 }

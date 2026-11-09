@@ -7,30 +7,28 @@
   It reads one JSON snapshot (Graph user + Exchange mailbox data) and the full planned
   removal batch, and returns ALLOW, BLOCK or REVIEW with reasons and sources.
   It connects to nothing, writes nothing, holds no secret and calls no AI model.
+  When a piece of data it needs is missing or unreadable, it does not decide: REVIEW.
 #>
 Set-StrictMode -Version Latest
 
-# 50 GB, the shared mailbox size limit without a license.
+# 50 GB, the shared mailbox size limit without a license, and 100 GB with Exchange Online (Plan 2).
 # Exchange sizes are binary: Set-Mailbox documents "1.999999999 terabytes (2199023254528 bytes)",
-# so 1 GB = 1,073,741,824 bytes and 50 GB = 53,687,091,200 bytes.
+# so 1 GB = 1,073,741,824 bytes, 50 GB = 53,687,091,200 bytes, 100 GB = 107,374,182,400 bytes.
 $script:SharedMailboxLimitBytes = [int64]53687091200
+$script:Plan2CeilingBytes = [int64]107374182400
 $script:Inv = [System.Globalization.CultureInfo]::InvariantCulture
 
 $script:Sources = @{
     SharedMailboxLimit = 'https://learn.microsoft.com/en-us/microsoft-365/admin/email/about-shared-mailboxes'
     ConvertMailbox     = 'https://learn.microsoft.com/en-us/microsoft-365/admin/email/convert-user-mailbox-to-shared-mailbox'
-    ByteUnits          = 'https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-mailbox'
     GroupLicensing     = 'https://learn.microsoft.com/en-us/microsoft-365/admin/manage/manage-group-licenses'
-    LicenseState       = 'https://learn.microsoft.com/en-us/graph/api/resources/licenseassignmentstate'
-    UserResource       = 'https://learn.microsoft.com/en-us/graph/api/resources/user'
-    IdentifyHold       = 'https://learn.microsoft.com/en-us/purview/ediscovery-identify-a-hold-on-an-exchange-online-mailbox'
-    GetMailbox         = 'https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-mailbox'
-    OrgConfig          = 'https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-organizationconfig'
+    LicenseState       = 'https://learn.microsoft.com/en-us/graph/api/resources/licenseassignmentstate?view=graph-rest-1.0'
+    UserResource       = 'https://learn.microsoft.com/en-us/graph/api/resources/user?view=graph-rest-1.0'
+    HoldTypes          = 'https://learn.microsoft.com/en-us/purview/edisc-hold-types-mailboxes'
+    GetExoMailbox      = 'https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-exomailbox'
     MailboxStats       = 'https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-exomailboxstatistics'
-    Licensing          = 'https://learn.microsoft.com/en-us/entra/identity/users/licensing-service-plan-reference'
     ArchiveProperties  = 'https://learn.microsoft.com/en-us/troubleshoot/microsoft-365/purview/archive-mailboxes/archivestatus-set-none'
     OverQuotaEffect    = 'https://techcommunity.microsoft.com/blog/exchange/correcting-shared-mailbox-provisioning-and-sizing/607991'
-    RewstRemoveLicense = 'https://docs.rewst.help/documentation/automations/subworkflows/rewst-task-m365-remove-licenses'
 }
 
 $script:Reference = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..' 'data' 'licensing-reference.json') | ConvertFrom-Json -AsHashtable
@@ -56,6 +54,11 @@ function Test-HasKey {
     return ($Object -is [System.Collections.IDictionary]) -and $Object.Contains($Key)
 }
 
+function Test-IsList {
+    param($Value)
+    return ($null -ne $Value) -and ($Value -is [System.Collections.IList])
+}
+
 function Get-ProductName {
     param([string]$SkuId)
     $n = $script:Reference.product_names[$SkuId.ToLowerInvariant()]
@@ -63,7 +66,7 @@ function Get-ProductName {
 }
 
 function Get-ByteCount {
-    # The snapshot carries the primary mailbox size as a whole number of bytes.
+    # The snapshot contract carries the primary mailbox size as a whole number of bytes.
     # Anything else (text, negative, fractional) is treated as unreadable.
     param([AllowNull()]$Value)
     if ($Value -is [int] -or $Value -is [long]) {
@@ -72,18 +75,27 @@ function Get-ByteCount {
     return $null
 }
 
+function Format-Size {
+    # Plain GB far from the 50 GB line; exact bytes within 1 GB of it, so a reason never
+    # reads "over its 50 GB quota at 50 GB".
+    param([int64]$Bytes)
+    if ([math]::Abs($Bytes - $script:SharedMailboxLimitBytes) -lt 1GB) {
+        return [string]::Format($script:Inv, '{0:N0} bytes', $Bytes)
+    }
+    return ([math]::Round($Bytes / 1GB, 1)).ToString($script:Inv) + ' GB'
+}
+
 function Get-HoldKind {
-    # Meaning of an InPlaceHolds entry from its prefix, as written on the Purview page
-    # "Identify the type of hold placed on an Exchange Online mailbox" (read 2026-11-09).
-    # Returns $null when the page gives no meaning for the prefix.
+    # Meaning of an InPlaceHolds entry from its prefix, as written on the Microsoft Purview page
+    # "Identify Exchange mailbox hold types in eDiscovery" (read 2026-11-09).
+    # Returns $null when that page gives no meaning for the prefix.
     param([string]$Entry)
     switch -Regex ($Entry) {
-        '^-mbx' { return 'exclusion from a retention policy' }
+        '^-mbx' { return 'exclusion from an organization-wide retention policy' }
         '^UniH' { return 'eDiscovery hold' }
-        '^cld'  { return 'In-Place Hold' }
         '^mbx'  { return 'retention policy' }
-        '^skp'  { return 'retention policy on Skype for Business conversations' }
-        '^grp'  { return 'retention policy on Microsoft 365 groups and Teams channel messages' }
+        '^skp'  { return 'retention policy applied to Skype for Business conversations' }
+        '^grp'  { return 'organization-wide retention policy applied to Microsoft 365 groups and Teams channel messages' }
         default { return $null }
     }
 }
@@ -136,7 +148,7 @@ function Test-OffboardingRemovalSafety {
         checked_batch    = $null
         automation_log   = $null
         writes           = 0
-        note             = 'success means the data was collected. It does not mean the removal is allowed: read decision.'
+        note             = 'success and status describe the data collection. Only decision says whether the batch may run.'
     }
 
     function Complete-Output {
@@ -144,39 +156,55 @@ function Test-OffboardingRemovalSafety {
         $out.automation_log = ($log -join "`n")
         return $out
     }
+    function Stop-Collection([string]$Rule, [string]$Text, [string]$Missing, [string]$Source) {
+        $log.Add("Collection failed: $Text")
+        $reasons.Add((New-Reason -Rule $Rule -Decision 'REVIEW' -Text "Human decision required: $Text" -MissingData $Missing -Source $Source))
+        return Complete-Output
+    }
 
     # 1. Load the snapshot.
     if ($PSCmdlet.ParameterSetName -eq 'Path') {
         if (-not (Test-Path -LiteralPath $SnapshotPath)) {
-            $log.Add("Snapshot not found: $SnapshotPath")
-            $reasons.Add((New-Reason -Rule 'snapshot-unreadable' -Decision 'REVIEW' -Text 'Human decision required: the snapshot could not be read.' -MissingData 'snapshot file' -Source $script:Sources.GetMailbox))
-            return Complete-Output
+            return Stop-Collection 'snapshot-unreadable' 'the snapshot file was not found.' 'snapshot file' $script:Sources.GetExoMailbox
         }
-        try { $Snapshot = Get-Content -Raw -LiteralPath $SnapshotPath | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
-        catch {
-            $log.Add("Snapshot is not valid JSON: $SnapshotPath")
-            $reasons.Add((New-Reason -Rule 'snapshot-unreadable' -Decision 'REVIEW' -Text 'Human decision required: the snapshot is not valid JSON.' -MissingData 'snapshot file' -Source $script:Sources.GetMailbox))
-            return Complete-Output
+        $parsed = $null
+        try { $parsed = Get-Content -Raw -LiteralPath $SnapshotPath | ConvertFrom-Json -AsHashtable -ErrorAction Stop }
+        catch { return Stop-Collection 'snapshot-unreadable' 'the snapshot is not valid JSON.' 'snapshot file' $script:Sources.GetExoMailbox }
+        if ($parsed -isnot [System.Collections.IDictionary]) {
+            return Stop-Collection 'snapshot-unreadable' 'the snapshot is not a JSON object.' 'snapshot file' $script:Sources.GetExoMailbox
         }
+        $Snapshot = $parsed
     }
     $log.Add("Read-only check started for aad_user_id $AadUserId in tenant $TenantId.")
 
     $user    = Get-SnapshotValue $Snapshot 'graph', 'user'
     $mailbox = Get-SnapshotValue $Snapshot 'exchange', 'mailbox'
-    if ($null -eq $user -or $null -eq $mailbox) {
-        $missing = if ($null -eq $user) { 'graph.user' } else { 'exchange.mailbox' }
-        $log.Add("Collection failed: $missing is missing.")
-        $reasons.Add((New-Reason -Rule 'collection-failed' -Decision 'REVIEW' -Text "Human decision required: $missing is missing from the snapshot." -MissingData $missing -Source $script:Sources.GetMailbox))
-        return Complete-Output
+    if ($user -isnot [System.Collections.IDictionary]) {
+        return Stop-Collection 'collection-failed' 'graph.user is missing from the snapshot.' 'graph.user' $script:Sources.UserResource
     }
-    $snapUserId = Get-SnapshotValue $user 'id'
-    if ([string]$snapUserId -ne $AadUserId) {
-        $log.Add("Collection failed: snapshot user $snapUserId is not $AadUserId.")
-        $reasons.Add((New-Reason -Rule 'user-mismatch' -Decision 'REVIEW' -Text "Human decision required: the snapshot describes user $snapUserId, not $AadUserId." -MissingData 'graph.user.id' -Source $script:Sources.UserResource))
-        return Complete-Output
+    if ($mailbox -isnot [System.Collections.IDictionary]) {
+        return Stop-Collection 'collection-failed' 'exchange.mailbox is missing from the snapshot.' 'exchange.mailbox' $script:Sources.GetExoMailbox
+    }
+    $snapUserId = [string](Get-SnapshotValue $user 'id')
+    if ($snapUserId -ne $AadUserId) {
+        return Stop-Collection 'user-mismatch' "the Graph data describes user $snapUserId, not $AadUserId." 'graph.user.id' $script:Sources.UserResource
     }
 
-    # 2. Tenant identity on each block of data.
+    # 2. The mailbox must be this user's mailbox.
+    $owner = [string](Get-SnapshotValue $mailbox 'ExternalDirectoryObjectId')
+    if (-not $owner) {
+        return Stop-Collection 'mailbox-owner-unknown' 'the mailbox ExternalDirectoryObjectId was not read, so the mailbox cannot be tied to the user.' 'mailbox ExternalDirectoryObjectId' $script:Sources.GetExoMailbox
+    }
+    if ($owner -ne $AadUserId) {
+        return Stop-Collection 'mailbox-owner-mismatch' "the mailbox belongs to $owner, not $AadUserId." 'mailbox of this user' $script:Sources.GetExoMailbox
+    }
+    $exGuid = [string](Get-SnapshotValue $mailbox 'ExchangeGuid')
+    $statGuid = [string](Get-SnapshotValue $Snapshot 'exchange', 'mailbox_statistics', 'MailboxGuid')
+    if ($exGuid -and $statGuid -and ($exGuid -ne $statGuid)) {
+        return Stop-Collection 'statistics-mismatch' "the size statistics describe mailbox $statGuid, not $exGuid." 'statistics of this mailbox' $script:Sources.MailboxStats
+    }
+
+    # 3. Tenant identity on each block of data.
     $graphTenant = [string](Get-SnapshotValue $Snapshot 'graph', 'tenant_id')
     $exoTenant   = [string](Get-SnapshotValue $Snapshot 'exchange', 'tenant_id')
     if ($graphTenant -ne $TenantId -or $exoTenant -ne $TenantId) {
@@ -184,98 +212,146 @@ function Test-OffboardingRemovalSafety {
         $log.Add('Tenant IDs differ between request, Graph and Exchange data.')
     }
 
-    # 3. Hybrid identities are out of scope.
-    if ((Get-SnapshotValue $user 'onPremisesSyncEnabled') -eq $true) {
-        $reasons.Add((New-Reason -Rule 'identity-synced' -Decision 'REVIEW' -Text 'Human decision required: identity synchronized from on-premises Active Directory, out of scope for this check.' -MissingData 'cloud-only identity' -Source $script:Sources.UserResource))
-        $log.Add('onPremisesSyncEnabled is true: hybrid identity, out of scope.')
+    # 4. Hybrid identities are out of scope. Absent is not the same as false.
+    if (-not (Test-HasKey $user 'onPremisesSyncEnabled')) {
+        $readWarnings++
+        $reasons.Add((New-Reason -Rule 'identity-unknown' -Decision 'REVIEW' -Text 'Human decision required: onPremisesSyncEnabled was not read, so a synced identity cannot be ruled out.' -MissingData 'Graph user onPremisesSyncEnabled' -Source $script:Sources.UserResource))
+    } else {
+        $sync = $user['onPremisesSyncEnabled']
+        if ($sync -is [bool] -and $sync) {
+            $reasons.Add((New-Reason -Rule 'identity-synced' -Decision 'REVIEW' -Text 'Human decision required: identity synchronized from on-premises Active Directory, out of scope for this check.' -MissingData 'cloud-only identity' -Source $script:Sources.UserResource))
+            $log.Add('onPremisesSyncEnabled is true: hybrid identity, out of scope.')
+        } elseif ($null -ne $sync -and $sync -isnot [bool]) {
+            $readWarnings++
+            $reasons.Add((New-Reason -Rule 'identity-unknown' -Decision 'REVIEW' -Text "Human decision required: onPremisesSyncEnabled is '$sync', not true, false or null." -MissingData 'Graph user onPremisesSyncEnabled' -Source $script:Sources.UserResource))
+        }
     }
 
-    # 4. Mailbox type read back from Exchange.
+    # 5. Mailbox type read back from Exchange. Only a SharedMailbox can be allowed.
     $type = [string](Get-SnapshotValue $mailbox 'RecipientTypeDetails')
     $conversionRequested = (Get-SnapshotValue $Snapshot 'conversion_requested') -eq $true
-    if ($conversionRequested -and $type -ne 'SharedMailbox') {
-        $shown = if ($type) { $type } else { 'unknown' }
-        $reasons.Add((New-Reason -Rule 'not-yet-shared' -Decision 'REVIEW' -Text "Human decision required: conversion to shared was requested but the mailbox reads back as $shown." -MissingData 'RecipientTypeDetails = SharedMailbox' -Source $script:Sources.ConvertMailbox))
+    if (-not $type) {
+        $readWarnings++
+        $reasons.Add((New-Reason -Rule 'type-unknown' -Decision 'REVIEW' -Text 'Human decision required: the mailbox type was not read.' -MissingData 'Get-Mailbox RecipientTypeDetails' -Source $script:Sources.ConvertMailbox))
+    } elseif ($type -ne 'SharedMailbox') {
+        if ($conversionRequested -and $type -eq 'UserMailbox') {
+            $reasons.Add((New-Reason -Rule 'not-yet-shared' -Decision 'REVIEW' -Text "Human decision required: conversion to shared was requested but the mailbox reads back as $type." -MissingData 'RecipientTypeDetails = SharedMailbox' -Source $script:Sources.ConvertMailbox))
+        } else {
+            $reasons.Add((New-Reason -Rule 'not-shared' -Decision 'REVIEW' -Text "Human decision required: the mailbox reads back as $type, not SharedMailbox. This check only approves batches for converted shared mailboxes." -MissingData 'RecipientTypeDetails = SharedMailbox' -Source $script:Sources.ConvertMailbox))
+        }
     }
-    $log.Add("Mailbox type read back: $(if ($type) { $type } else { 'unknown' }).")
+    $log.Add("Mailbox type read back: $(if ($type) { $type } else { 'not read' }).")
 
-    # 5. Mailbox size, in bytes.
+    # 6. Mailbox size, in bytes.
     $rawSize = Get-SnapshotValue $Snapshot 'exchange', 'mailbox_statistics', 'TotalItemSize'
     $sizeBytes = Get-ByteCount $rawSize
     if ($null -eq $sizeBytes) {
         $readWarnings++
-        $why = if ($null -eq $rawSize) { 'missing' } else { 'unreadable (expected a whole number of bytes)' }
-        $reasons.Add((New-Reason -Rule 'size-unreadable' -Decision 'REVIEW' -Text "Human decision required: mailbox size $why." -MissingData 'Get-EXOMailboxStatistics TotalItemSize' -Source $script:Sources.MailboxStats))
+        $why = if ($null -eq $rawSize) { 'missing' } else { 'unreadable (the snapshot contract expects a whole number of bytes)' }
+        $reasons.Add((New-Reason -Rule 'size-unreadable' -Decision 'REVIEW' -Text "Human decision required: mailbox size $why." -MissingData 'Get-EXOMailboxStatistics TotalItemSize, in bytes' -Source $script:Sources.MailboxStats))
         $log.Add("Mailbox size $why.")
     } else {
         $log.Add([string]::Format($script:Inv, 'Primary mailbox size: {0:N0} bytes (limit without license {1:N0}).', $sizeBytes, $script:SharedMailboxLimitBytes))
     }
 
-    # 6. Archive. Microsoft says to read ArchiveGuid and ArchiveDatabase, not ArchiveStatus.
-    if (-not (Test-HasKey $mailbox 'ArchiveGuid') -or -not (Test-HasKey $mailbox 'ArchiveDatabase')) {
+    # 7. Archive. Microsoft says to read ArchiveGuid and ArchiveDatabase, not ArchiveStatus.
+    $zeroGuid = '00000000-0000-0000-0000-000000000000'
+    if (-not (Test-HasKey $mailbox 'ArchiveGuid') -or -not (Test-HasKey $mailbox 'ArchiveDatabase') -or $null -eq $mailbox['ArchiveGuid']) {
         $readWarnings++
-        $reasons.Add((New-Reason -Rule 'archive-unknown' -Decision 'REVIEW' -Text 'Human decision required: archive status was not read.' -MissingData 'Get-Mailbox ArchiveGuid and ArchiveDatabase' -Source $script:Sources.ArchiveProperties))
+        $reasons.Add((New-Reason -Rule 'archive-unknown' -Decision 'REVIEW' -Text 'Human decision required: the archive fields were not read.' -MissingData 'Get-Mailbox ArchiveGuid and ArchiveDatabase' -Source $script:Sources.ArchiveProperties))
     } else {
-        $aGuid = [string]$mailbox['ArchiveGuid']
-        $aDb = [string]$mailbox['ArchiveDatabase']
-        $hasGuid = $aGuid -and ($aGuid -ne '00000000-0000-0000-0000-000000000000')
-        if ($hasGuid -or $aDb) {
-            $reasons.Add((New-Reason -Rule 'archive-present' -Decision 'REVIEW' -Text 'Human decision required: an online archive is present (ArchiveGuid or ArchiveDatabase is set). A shared mailbox with an archive needs Exchange Online Plan 2, or Plan 1 with Exchange Online Archiving.' -MissingData 'license decision for the archive' -Source $script:Sources.SharedMailboxLimit))
+        $hasGuid = ([string]$mailbox['ArchiveGuid']) -and ([string]$mailbox['ArchiveGuid'] -ne $zeroGuid)
+        $hasDb = [bool]([string]$mailbox['ArchiveDatabase'])
+        if ($hasGuid -and $hasDb) {
+            $reasons.Add((New-Reason -Rule 'archive-present' -Decision 'REVIEW' -Text 'Human decision required: an online archive is present. Microsoft: "To increase the size of the archive mailbox, an Exchange Online Plan 2 license or an Exchange Online Plan 1 license with an Exchange Online Archiving add-on license is required."' -MissingData 'license decision for the archive' -Source $script:Sources.SharedMailboxLimit))
+        } elseif ($hasGuid -or $hasDb) {
+            $readWarnings++
+            $reasons.Add((New-Reason -Rule 'archive-inconsistent' -Decision 'REVIEW' -Text 'Human decision required: archive state inconsistent (only one of ArchiveGuid and ArchiveDatabase is set).' -MissingData 'consistent ArchiveGuid and ArchiveDatabase' -Source $script:Sources.ArchiveProperties))
         }
     }
 
-    # 7. Holds on the mailbox.
+    # 8. Holds on the mailbox. A flag that is missing, null or not a boolean counts as not read.
     foreach ($flag in 'LitigationHoldEnabled', 'ComplianceTagHoldApplied', 'DelayHoldApplied', 'DelayReleaseHoldApplied') {
-        if (-not (Test-HasKey $mailbox $flag)) {
+        $v = if (Test-HasKey $mailbox $flag) { $mailbox[$flag] } else { $null }
+        if ($v -isnot [bool]) {
             $readWarnings++
-            $reasons.Add((New-Reason -Rule 'hold-unknown' -Decision 'REVIEW' -Text "Human decision required: $flag was not read." -MissingData "Get-Mailbox $flag" -Source $script:Sources.IdentifyHold))
-        } elseif ($mailbox[$flag] -eq $true) {
-            $reasons.Add((New-Reason -Rule 'hold-present' -Decision 'REVIEW' -Text "Human decision required: $flag is true on the mailbox." -MissingData 'hold decision by the client' -Source $script:Sources.IdentifyHold -Extra ([ordered]@{ hold_scope = 'mailbox'; hold_property = $flag })))
+            $reasons.Add((New-Reason -Rule 'hold-unknown' -Decision 'REVIEW' -Text "Human decision required: $flag was not read." -MissingData "Get-Mailbox $flag" -Source $script:Sources.HoldTypes))
+        } elseif ($v) {
+            $reasons.Add((New-Reason -Rule 'hold-present' -Decision 'REVIEW' -Text "Human decision required: $flag is true on the mailbox, so the mailbox is on hold." -MissingData 'hold decision by whoever owns the hold' -Source $script:Sources.HoldTypes -Extra ([ordered]@{ hold_scope = 'mailbox'; hold_property = $flag })))
         }
     }
-    if (-not (Test-HasKey $mailbox 'InPlaceHolds')) {
+    $exclusions = @()
+    if (-not (Test-HasKey $mailbox 'InPlaceHolds') -or $null -eq $mailbox['InPlaceHolds']) {
         $readWarnings++
-        $reasons.Add((New-Reason -Rule 'hold-unknown' -Decision 'REVIEW' -Text 'Human decision required: mailbox InPlaceHolds was not read.' -MissingData 'Get-Mailbox InPlaceHolds' -Source $script:Sources.IdentifyHold))
+        $reasons.Add((New-Reason -Rule 'hold-unknown' -Decision 'REVIEW' -Text 'Human decision required: mailbox InPlaceHolds was not read.' -MissingData 'Get-Mailbox InPlaceHolds' -Source $script:Sources.HoldTypes))
     } else {
         foreach ($h in @($mailbox['InPlaceHolds'] | Where-Object { $_ })) {
-            if ($h -like '-mbx*') { $log.Add("Mailbox is excluded from retention policy $h."); continue }
+            if ($h -like '-mbx*') { $exclusions += [string]$h; $log.Add("Mailbox InPlaceHolds lists exclusion $h."); continue }
             $kind = Get-HoldKind $h
             $extra = [ordered]@{ hold_scope = 'mailbox'; hold_entry = $h }
             if ($kind) { $extra.hold_type = $kind }
-            $reasons.Add((New-Reason -Rule 'hold-present' -Decision 'REVIEW' -Text "Human decision required: InPlaceHolds on the mailbox lists $h$(if ($kind) { " ($kind)" })." -MissingData 'hold decision by the client' -Source $script:Sources.IdentifyHold -Extra $extra))
+            $reasons.Add((New-Reason -Rule 'hold-present' -Decision 'REVIEW' -Text "Human decision required: the mailbox InPlaceHolds lists $h$(if ($kind) { ", a $kind" })." -MissingData 'hold decision by whoever owns the hold' -Source $script:Sources.HoldTypes -Extra $extra))
         }
     }
 
-    # 8. Organization-wide retention: an empty mailbox InPlaceHolds does not rule it out.
+    # 9. Organization-wide retention: an empty mailbox InPlaceHolds does not rule it out.
     $org = Get-SnapshotValue $Snapshot 'exchange', 'organization_config'
     if ($null -eq $org -or -not (Test-HasKey $org 'InPlaceHolds') -or $null -eq $org['InPlaceHolds']) {
         $readWarnings++
-        $reasons.Add((New-Reason -Rule 'org-retention-unknown' -Decision 'REVIEW' -Text 'Human decision required: organization-wide retention could not be read, so its scope is unknown.' -MissingData 'Get-OrganizationConfig InPlaceHolds' -Source $script:Sources.IdentifyHold))
+        $reasons.Add((New-Reason -Rule 'org-retention-unknown' -Decision 'REVIEW' -Text 'Human decision required: the organization''s retention settings could not be read, so the check does not approve the batch.' -MissingData 'Get-OrganizationConfig InPlaceHolds' -Source $script:Sources.HoldTypes))
         $log.Add('Organization-wide retention not readable.')
     } else {
         foreach ($h in @($org['InPlaceHolds'] | Where-Object { $_ })) {
             $kind = Get-HoldKind $h
             $extra = [ordered]@{ hold_scope = 'organization'; hold_entry = $h }
             if ($kind) { $extra.hold_type = $kind }
-            $reasons.Add((New-Reason -Rule 'hold-present' -Decision 'REVIEW' -Text "Human decision required: organization InPlaceHolds lists $h$(if ($kind) { " ($kind)" }), which can cover this mailbox." -MissingData 'retention policy scope and exclusions' -Source $script:Sources.IdentifyHold -Extra $extra))
+            $text = "Human decision required: the organization InPlaceHolds lists $h$(if ($kind) { ", a $kind" })."
+            $guid = ([string]$h -replace '^(mbx|grp|skp)', '') -replace ':\d+$', ''
+            $match = @($exclusions | Where-Object { $_ -eq "-mbx$guid" })
+            if ($match.Count -gt 0) {
+                $text += " The mailbox InPlaceHolds also lists $($match[0])."
+                $extra.mailbox_exclusion = $match[0]
+            }
+            $reasons.Add((New-Reason -Rule 'hold-present' -Decision 'REVIEW' -Text $text -MissingData 'retention policy scope and exclusions' -Source $script:Sources.HoldTypes -Extra $extra))
         }
     }
+    $holdFound = [bool]@($reasons | Where-Object { $_.rule -eq 'hold-present' }).Count
 
-    # 9. License assignments: which ones survive the whole batch.
-    $plannedGroups = @((Get-SnapshotValue $Snapshot 'planned_removals', 'groups') | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() })
-    $plannedSkus   = @((Get-SnapshotValue $Snapshot 'planned_removals', 'license_sku_ids') | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    # 10. The removal batch. Missing lists are not empty lists.
     $groupNames = @{}
     $groupList = Get-SnapshotValue $Snapshot 'graph', 'groups'
     foreach ($g in @($groupList)) {
-        if ($g -is [System.Collections.IDictionary] -and $g.Contains('id')) { $groupNames[([string]$g.id).ToLowerInvariant()] = [string]$g.displayName }
+        if ($g -is [System.Collections.IDictionary] -and $g.Contains('id') -and $g['id']) {
+            $gid = ([string]$g['id']).ToLowerInvariant()
+            $groupNames[$gid] = if ($g.Contains('displayName') -and $g['displayName']) { [string]$g['displayName'] } else { $null }
+        }
+    }
+    function Get-GroupLabel([string]$Id) { if ($groupNames[$Id]) { $groupNames[$Id] } else { $Id } }
+
+    $batchKnown = $true
+    $plannedGroups = @(); $plannedSkus = @()
+    $pr = Get-SnapshotValue $Snapshot 'planned_removals'
+    $prGroups = Get-SnapshotValue $pr 'groups'
+    $prSkus = Get-SnapshotValue $pr 'license_sku_ids'
+    if (-not (Test-IsList $prGroups) -or -not (Test-IsList $prSkus)) {
+        $batchKnown = $false
+        $readWarnings++
+        $reasons.Add((New-Reason -Rule 'batch-unreadable' -Decision 'REVIEW' -Text 'Human decision required: the planned removal batch was not read (planned_removals.groups and planned_removals.license_sku_ids must both be lists; an empty list is fine).' -MissingData 'planned_removals.groups and planned_removals.license_sku_ids' -Source $script:Sources.GroupLicensing))
+        $log.Add('Removal batch not readable.')
+    } else {
+        $plannedGroups = @($prGroups | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() } | Select-Object -Unique)
+        $plannedSkus   = @($prSkus | Where-Object { $_ } | ForEach-Object { ([string]$_).ToLowerInvariant() } | Select-Object -Unique)
     }
     $out.checked_batch = [ordered]@{
-        groups   = @($plannedGroups | ForEach-Object { [ordered]@{ id = $_; displayName = $groupNames[$_] } })
+        groups   = @($plannedGroups | ForEach-Object { [ordered]@{ id = $_; displayName = (Get-GroupLabel $_) } })
         licenses = @($plannedSkus | ForEach-Object { [ordered]@{ skuId = $_; product = (Get-ProductName $_) } })
     }
 
+    # 11. License assignments: which Plan 2 assignments survive the whole batch.
+    $licensesKnown = $true
     $assignments = Get-SnapshotValue $user 'licenseAssignmentStates'
-    if ($null -eq $assignments) {
+    if (-not (Test-IsList $assignments)) {
+        $licensesKnown = $false
         $readWarnings++
         $reasons.Add((New-Reason -Rule 'licenses-unknown' -Decision 'REVIEW' -Text 'Human decision required: license assignments were not read.' -MissingData 'Graph user licenseAssignmentStates' -Source $script:Sources.LicenseState))
         $assignments = @()
@@ -284,66 +360,89 @@ function Test-OffboardingRemovalSafety {
     $removedActive = [System.Collections.Generic.List[object]]::new()
     $keptActive    = [System.Collections.Generic.List[object]]::new()
     $keptInError   = [System.Collections.Generic.List[object]]::new()
+    $removedOther  = 0
     foreach ($a in @($assignments)) {
-        $sku = ([string](Get-SnapshotValue $a 'skuId')).ToLowerInvariant()
+        $complete = ($a -is [System.Collections.IDictionary]) -and $a.Contains('assignedByGroup') -and $a.Contains('disabledPlans') -and
+                    $a.Contains('skuId') -and $a['skuId'] -and $a.Contains('state') -and (Test-IsList $a['disabledPlans'])
+        if (-not $complete) {
+            $licensesKnown = $false
+            $readWarnings++
+            $reasons.Add((New-Reason -Rule 'assignment-incomplete' -Decision 'REVIEW' -Text 'Human decision required: a license assignment is missing skuId, state, disabledPlans or assignedByGroup (only an explicit null assignedByGroup means a direct assignment).' -MissingData 'complete licenseAssignmentState' -Source $script:Sources.LicenseState))
+            continue
+        }
+        $sku = ([string]$a['skuId']).ToLowerInvariant()
         if ($script:Plan2SkuIds -notcontains $sku) { continue }
-        $disabled = @((Get-SnapshotValue $a 'disabledPlans') | ForEach-Object { ([string]$_).ToLowerInvariant() })
+        $disabled = @($a['disabledPlans'] | ForEach-Object { ([string]$_).ToLowerInvariant() })
         if ($disabled -contains $script:Plan2ServicePlanId) { continue }
-        $byGroup = Get-SnapshotValue $a 'assignedByGroup'
-        $groupId = if ($byGroup) { ([string]$byGroup).ToLowerInvariant() } else { $null }
+        $groupId = if ($a['assignedByGroup']) { ([string]$a['assignedByGroup']).ToLowerInvariant() } else { $null }
         $removed = if ($groupId) { $plannedGroups -contains $groupId } else { $plannedSkus -contains $sku }
-        $state = [string](Get-SnapshotValue $a 'state')
-        $err = [string](Get-SnapshotValue $a 'error')
+        $state = [string]$a['state']
+        $err = if ($a.Contains('error')) { [string]$a['error'] } else { '' }
         $healthy = ($state -eq 'Active') -and (-not $err -or $err -eq 'None')
         $desc = [ordered]@{
             skuId           = $sku
             product         = (Get-ProductName $sku)
             assigned        = if ($groupId) { 'by group' } else { 'directly' }
             assignedByGroup = $groupId
-            group_name      = if ($groupId) { $groupNames[$groupId] } else { $null }
+            group_name      = if ($groupId) { Get-GroupLabel $groupId } else { $null }
             state           = $state
             error           = $err
         }
-        if ($removed) { if ($healthy) { $removedActive.Add($desc) } }
+        if ($removed) { if ($healthy) { $removedActive.Add($desc) } else { $removedOther++ } }
         elseif ($healthy) { $keptActive.Add($desc) }
         else { $keptInError.Add($desc) }
     }
-    $log.Add("Plan 2 assignments: $($removedActive.Count) active removed by the batch, $($keptActive.Count) active kept, $($keptInError.Count) kept but not active.")
+    $log.Add("Plan 2 assignments: $($removedActive.Count) healthy removed by the batch, $($keptActive.Count) healthy kept, $($keptInError.Count) kept but not healthy.")
 
-    # 10. The 50 GB rule for a shared mailbox.
-    if ($null -ne $sizeBytes -and $sizeBytes -ge $script:SharedMailboxLimitBytes -and $type -eq 'SharedMailbox') {
-        $gb = ([math]::Round($sizeBytes / 1GB, 1)).ToString($script:Inv)
+    # 12. The 50 GB rule. Only decided when size, batch and every assignment were read.
+    if ($null -ne $sizeBytes -and $batchKnown -and $licensesKnown -and $sizeBytes -ge $script:SharedMailboxLimitBytes -and ($type -eq 'SharedMailbox' -or $type -eq 'UserMailbox')) {
+        $size = Format-Size $sizeBytes
         if ($keptActive.Count -gt 0) {
             $out.capacity_kept_by = @($keptActive)
-            $log.Add('Mailbox capacity stays covered by an active Plan 2 assignment outside the batch.')
+            $log.Add('Mailbox capacity stays covered by a healthy Plan 2 assignment outside the batch.')
+            if ($type -eq 'SharedMailbox' -and $sizeBytes -gt $script:Plan2CeilingBytes) {
+                $reasons.Add((New-Reason -Rule 'over-plan2-ceiling' -Decision 'REVIEW' -Text "Human decision required: the mailbox is $size, above the 100 GB that Exchange Online Plan 2 gives a shared mailbox (a nominal limit; an admin can set a lower quota)." -MissingData 'storage decision for the mailbox' -Source $script:Sources.SharedMailboxLimit))
+            }
         } elseif ($removedActive.Count -gt 0 -and $keptInError.Count -gt 0) {
             $e = $keptInError[0]
-            $reasons.Add((New-Reason -Rule 'replacement-in-error' -Decision 'REVIEW' -Text "Human decision required: the replacement $($e.product) assignment is $($e.state) (error $($e.error)), so it does not yet cover the $gb GB mailbox." -MissingData 'replacement license state = Active' -Source $script:Sources.LicenseState))
+            $reasons.Add((New-Reason -Rule 'replacement-in-error' -Decision 'REVIEW' -Text "Human decision required: the replacement $($e.product) assignment outside the batch is $($e.state) (error $($e.error)), so it does not yet cover the $size mailbox." -MissingData 'replacement assignment Active with no error' -Source $script:Sources.LicenseState))
         } elseif ($removedActive.Count -gt 0) {
+            $byGroup = @($removedActive | Where-Object { $_.assignedByGroup })
             $carriers = @($removedActive | ForEach-Object {
-                if ($_.assignedByGroup) { "group $($_.group_name) ($($_.assignedByGroup))" } else { "direct assignment of $($_.product)" }
-            })
-            $groupsCarrying = @($removedActive | Where-Object { $_.assignedByGroup } | ForEach-Object { [ordered]@{ id = $_.assignedByGroup; displayName = $_.group_name } })
-            $reasons.Add((New-Reason -Rule 'last-plan2-removed' -Decision 'BLOCK' `
-                -Text "This batch removes the last active Exchange Online (Plan 2) assignment, carried by $($carriers -join ' and '). The mailbox stays shared but goes over its 50 GB quota at $gb GB." `
+                if ($_.assignedByGroup) { "group $($_.group_name)" } else { "a direct assignment of $($_.product)" }
+            } | Select-Object -Unique)
+            $groupsCarrying = @($byGroup | ForEach-Object { [ordered]@{ id = $_.assignedByGroup; displayName = $_.group_name } })
+            $quota = if ($sizeBytes -eq $script:SharedMailboxLimitBytes) { "reaches the 50 GB quota at exactly $size" } else { "goes over its 50 GB quota at $size" }
+            $what = if ($type -eq 'SharedMailbox') { "The mailbox stays shared but $quota." } else { "The mailbox still reads back as UserMailbox; as a shared mailbox without that license it $quota." }
+            if ($byGroup.Count -gt 0) {
+                $first = if ($holdFound) { 'Keep Plan 2 assigned independently of the group' } else { 'Keep Exchange Online (Plan 2) assigned independently of the group' }
+                $fix = "$($first): assign it directly, confirm the assignment is Active, then check again."
+            } else {
+                $first = if ($holdFound) { 'Keep Plan 2 assigned' } else { 'Keep Exchange Online (Plan 2) assigned' }
+                $fix = "$($first): take the direct Exchange Online (Plan 2) license out of the batch, then check again."
+            }
+            $fix += if ($holdFound) { ' Bringing the mailbox under 50 GB is an option only after whoever owns the hold approves.' } else { ' Or bring the mailbox under 50 GB, then check again.' }
+            $reasons.Insert(0, (New-Reason -Rule 'last-plan2-removed' -Decision 'BLOCK' `
+                -Text "This batch removes the last healthy Exchange Online (Plan 2) assignment, carried by $($carriers -join ' and '). $what" `
                 -Source $script:Sources.SharedMailboxLimit `
                 -Extra ([ordered]@{
                     carried_by         = $groupsCarrying
                     consequence        = 'Exchange team blog: when the license is removed from a converted shared mailbox over 50 GB, the 50 GB quota is enforced, sending and receiving stop, and incoming mail fails with "Mailbox is full", code 5.2.2.'
                     consequence_source = $script:Sources.OverQuotaEffect
-                    remediation        = 'Assign Exchange Online (Plan 2) independently of the group, confirm the assignment is Active, then check again. Or bring the mailbox under 50 GB, then check again.'
+                    remediation        = $fix
                     remediation_source = $script:Sources.ConvertMailbox
                 })))
-            $log.Add('BLOCK: the batch removes the last active Plan 2 for a shared mailbox over 50 GB.')
-        } else {
-            $reasons.Add((New-Reason -Rule 'over-quota-without-plan2' -Decision 'REVIEW' -Text "Human decision required: the shared mailbox is $gb GB and no active Exchange Online (Plan 2) assignment covers it now." -MissingData 'license decision for the mailbox size' -Source $script:Sources.SharedMailboxLimit))
+            $log.Add('BLOCK: the batch removes the last healthy Plan 2 for a mailbox of 50 GB or more.')
+        } elseif ($type -eq 'SharedMailbox') {
+            $reasons.Add((New-Reason -Rule 'over-quota-without-plan2' -Decision 'REVIEW' -Text "Human decision required: the shared mailbox is $size and no healthy (Active, no error) Exchange Online (Plan 2) assignment covers it now." -MissingData 'license decision for the mailbox size' -Source $script:Sources.SharedMailboxLimit))
         }
     }
 
-    # 11. Decision.
+    # 13. Decision. BLOCK wins over REVIEW, REVIEW over ALLOW. ALLOW needs a SharedMailbox.
     $decision = 'ALLOW'
     if ($reasons | Where-Object { $_.decision -eq 'REVIEW' }) { $decision = 'REVIEW' }
     if ($reasons | Where-Object { $_.decision -eq 'BLOCK' }) { $decision = 'BLOCK' }
+    if ($decision -eq 'ALLOW' -and $type -ne 'SharedMailbox') { $decision = 'REVIEW' }
     $out.success = $true
     $out.status = if ($readWarnings -gt 0) { 1001 } else { 1000 }
     $out.decision = $decision
