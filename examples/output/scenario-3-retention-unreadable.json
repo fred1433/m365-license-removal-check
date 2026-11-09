@@ -1,0 +1,41 @@
+{
+  "inputs": {
+    "aad_user_id": "a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13",
+    "tenant_id": "7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d"
+  },
+  "success": true,
+  "status": 1001,
+  "decision": "REVIEW",
+  "reasons": [
+    {
+      "rule": "org-retention-unknown",
+      "decision": "REVIEW",
+      "text": "Human decision required: organization-wide retention could not be read, so its scope is unknown.",
+      "missing_data": "Get-OrganizationConfig InPlaceHolds",
+      "source": "https://learn.microsoft.com/en-us/purview/ediscovery-identify-a-hold-on-an-exchange-online-mailbox"
+    }
+  ],
+  "capacity_kept_by": [
+    {
+      "skuId": "19ec0d23-8335-4cbd-94ac-6050e30712fa",
+      "product": "Exchange Online (Plan 2)",
+      "assigned": "directly",
+      "assignedByGroup": null,
+      "group_name": null,
+      "state": "Active",
+      "error": "None"
+    }
+  ],
+  "checked_batch": {
+    "groups": [
+      {
+        "id": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
+        "displayName": "Firm Staff"
+      }
+    ],
+    "licenses": []
+  },
+  "automation_log": "Read-only check started for aad_user_id a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13 in tenant 7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d.\nMailbox type read back: SharedMailbox.\nPrimary mailbox size: 66,571,993,088 bytes (limit without license 53,687,091,200).\nOrganization-wide retention not readable.\nPlan 2 assignments: 1 active removed by the batch, 1 active kept, 0 kept but not active.\nMailbox capacity stays covered by an active Plan 2 assignment outside the batch.\nDecision: REVIEW. Nothing was changed in the tenant.",
+  "writes": 0,
+  "note": "success means the data was collected. It does not mean the removal is allowed: read decision."
+}

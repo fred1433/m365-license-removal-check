@@ -1,0 +1,40 @@
+{
+  "inputs": {
+    "aad_user_id": "a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13",
+    "tenant_id": "7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d"
+  },
+  "success": true,
+  "status": 1000,
+  "decision": "BLOCK",
+  "reasons": [
+    {
+      "rule": "last-plan2-removed",
+      "decision": "BLOCK",
+      "text": "This batch removes the last active Exchange Online (Plan 2) assignment, carried by group Firm Staff (e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b). The mailbox stays shared but goes over its 50 GB quota at 62 GB.",
+      "carried_by": [
+        {
+          "id": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
+          "displayName": "Firm Staff"
+        }
+      ],
+      "consequence": "Exchange team blog: when the license is removed from a converted shared mailbox over 50 GB, the 50 GB quota is enforced, sending and receiving stop, and incoming mail fails with \"Mailbox is full\", code 5.2.2.",
+      "consequence_source": "https://techcommunity.microsoft.com/blog/exchange/correcting-shared-mailbox-provisioning-and-sizing/607991",
+      "remediation": "Assign Exchange Online (Plan 2) independently of the group, confirm the assignment is Active, then check again. Or bring the mailbox under 50 GB, then check again.",
+      "remediation_source": "https://learn.microsoft.com/en-us/microsoft-365/admin/email/convert-user-mailbox-to-shared-mailbox",
+      "source": "https://learn.microsoft.com/en-us/microsoft-365/admin/email/about-shared-mailboxes"
+    }
+  ],
+  "capacity_kept_by": [],
+  "checked_batch": {
+    "groups": [
+      {
+        "id": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
+        "displayName": "Firm Staff"
+      }
+    ],
+    "licenses": []
+  },
+  "automation_log": "Read-only check started for aad_user_id a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13 in tenant 7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d.\nMailbox type read back: SharedMailbox.\nPrimary mailbox size: 66,571,993,088 bytes (limit without license 53,687,091,200).\nPlan 2 assignments: 1 active removed by the batch, 0 active kept, 0 kept but not active.\nBLOCK: the batch removes the last active Plan 2 for a shared mailbox over 50 GB.\nDecision: BLOCK. Nothing was changed in the tenant.",
+  "writes": 0,
+  "note": "success means the data was collected. It does not mean the removal is allowed: read decision."
+}

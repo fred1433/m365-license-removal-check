@@ -1,0 +1,73 @@
+{
+  "_note": "Fictional tenant, fictional firm, fictional person. Not exported from any real Microsoft 365 tenant.",
+  "captured_at": "2026-11-09T09:14:00Z",
+  "conversion_requested": true,
+  "graph": {
+    "tenant_id": "7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d",
+    "user": {
+      "id": "a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13",
+      "displayName": "Dana Whitcombe",
+      "userPrincipalName": "dana.whitcombe@harrowvale.example",
+      "accountEnabled": false,
+      "onPremisesSyncEnabled": null,
+      "licenseAssignmentStates": [
+        {
+          "assignedByGroup": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
+          "disabledPlans": [],
+          "error": "None",
+          "lastUpdatedDateTime": "2025-03-04T16:20:11Z",
+          "skuId": "cbdc14ab-d96c-4c30-b9f4-6ada7cdc1d46",
+          "state": "Active"
+        },
+        {
+          "assignedByGroup": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
+          "disabledPlans": [],
+          "error": "None",
+          "lastUpdatedDateTime": "2025-03-04T16:20:11Z",
+          "skuId": "19ec0d23-8335-4cbd-94ac-6050e30712fa",
+          "state": "Active"
+        },
+        {
+          "assignedByGroup": null,
+          "disabledPlans": [],
+          "error": "None",
+          "lastUpdatedDateTime": "2026-11-09T08:57:40Z",
+          "skuId": "19ec0d23-8335-4cbd-94ac-6050e30712fa",
+          "state": "Active"
+        }
+      ]
+    },
+    "groups": [
+      {
+        "id": "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b",
+        "displayName": "Firm Staff"
+      }
+    ]
+  },
+  "exchange": {
+    "tenant_id": "7d3e5c1a-2b4f-4e8a-9c6d-0f1e2a3b4c5d",
+    "mailbox": {
+      "ExternalDirectoryObjectId": "a41f6b2e-8c3d-4f7a-b1e9-52d06c8e7f13",
+      "RecipientTypeDetails": "SharedMailbox",
+      "ArchiveGuid": "00000000-0000-0000-0000-000000000000",
+      "ArchiveDatabase": null,
+      "LitigationHoldEnabled": false,
+      "InPlaceHolds": [],
+      "ComplianceTagHoldApplied": false,
+      "DelayHoldApplied": false,
+      "DelayReleaseHoldApplied": false
+    },
+    "mailbox_statistics": {
+      "TotalItemSize": 66571993088
+    },
+    "organization_config": {
+      "InPlaceHolds": []
+    }
+  },
+  "planned_removals": {
+    "groups": [
+      "e2b7c9d4-1a5f-4d3e-8b6c-9f0a1e2d3c4b"
+    ],
+    "license_sku_ids": []
+  }
+}
